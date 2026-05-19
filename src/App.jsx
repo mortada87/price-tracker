@@ -326,7 +326,7 @@ export default function App() {
     if (!config) {
         return (
             <div style={{ minHeight: "100vh", background: C.bg, color: C.dim, fontFamily: "'DM Mono', monospace", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12 }}>
-                {connError ? `Backend unreachable — ${connError}` : "Loading from backend…"}
+                {connError ? connError : "Loading from backend…"}
             </div>
         );
     }
@@ -359,7 +359,7 @@ export default function App() {
                         <span style={{ flex: 1, color: alert ? C.red : running ? C.green : C.dim }}>
                             {connError ? `⚠ ${connError}` :
                                 alert ? `🎯 Target hit! CHF ${cur?.toFixed(2)} — buy now!` :
-                                    loading ? "Fetching price from interismo.ch…" :
+                                    loading ? "Fetching price (initial check may take a few seconds)…" :
                                         running ? (onVercel
                                             ? `Monitoring — automatic check ${meta.cronSchedule || "daily"}${countdown != null ? ` (≈ ${formatCountdown(countdown)})` : ""}`
                                             : `Monitoring — next check in ${countdown != null ? formatCountdown(countdown) : "…"}`) :

@@ -5,6 +5,7 @@
 
 import { requireAuth } from "./_lib/auth.js";
 import { setStatus, appendLog } from "./_lib/store.js";
+import { runCheck } from "./_lib/check.js";
 
 async function handler(req, res) {
     if (req.method !== "POST") {
@@ -20,7 +21,9 @@ async function handler(req, res) {
         nextCheckAt: next.getTime(),
     });
     await appendLog("▶ Started — Vercel Cron will check daily (~09:00 UTC)", "info");
-    res.json({ ok: true, status });
+    // Same as local Express: run a check immediately, not only on the next cron tick.
+    const check = await runCheck();
+    res.json({ ok: true, status, check });
 }
 
 export default requireAuth(handler);
