@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
 
 // All scraping, LLM, and scheduling now live in the Node.js backend
@@ -129,19 +129,27 @@ export default function App() {
     const [meta, setMeta] = useState({ notifierConfigured: false, anthropicKeyConfigured: false });
 
     // UI-only state.
-    const [now, setNow] = useState(Date.now());
+    const [now, setNow] = useState(() => Date.now());
     const [connError, setConnError] = useState(null);
     const [busy, setBusy] = useState(false); // disables buttons during an HTTP round-trip
     const [token, setToken] = useState(() => readInitialToken());
     const [needsToken, setNeedsToken] = useState(false);
     const [tokenInput, setTokenInput] = useState("");
 
-    const esRef = useRef(null);
-
-    // ── Initial load + SSE subscription ────────────────────────────────────
+    // ── Initial load + polling ────────────────────────────────────────────
+    // Polls `/api/state` every few seconds. Replaces the SSE stream we used
+    // when the backend was a long-running Express process — Vercel's
+    // serverless functions can't hold an open connection long enough for
+    // SSE to be reliable, so we accept ~3s latency in exchange for working
+    // on any function timeout.
     useEffect(() => {
+        if (needsToken) return undefined;
+
         let cancelled = false;
-        (async () => {
+        let timer = null;
+
+        const tick = async () => {
+            if (cancelled) return;
             try {
                 const data = await apiGet("/state", token);
                 if (cancelled) return;
@@ -151,60 +159,44 @@ export default function App() {
                 setLogs(data.logs || []);
                 setMeta(data.meta || {});
                 setConnError(null);
-                setNeedsToken(false);
             } catch (e) {
                 if (cancelled) return;
                 if (e.message === "unauthorized") {
                     clearToken();
                     setToken("");
                     setNeedsToken(true);
-                } else {
-                    setConnError(e.message);
+                    return; // stop polling — token prompt takes over
+                }
+                setConnError(e.message);
+            } finally {
+                // Visible tab → 3s; hidden → 30s. Saves KV reads when the
+                // dashboard isn't being looked at.
+                if (!cancelled) {
+                    const delay = typeof document !== "undefined" && document.hidden ? 30000 : 3000;
+                    timer = setTimeout(tick, delay);
                 }
             }
-        })();
-        return () => { cancelled = true; };
-    }, [token]);
-
-    useEffect(() => {
-        if (needsToken) return undefined;
-        const es = new EventSource(withToken(`${API}/stream`, token));
-        esRef.current = es;
-
-        es.addEventListener("state", (ev) => {
-            const data = JSON.parse(ev.data);
-            setConfig(data.config);
-            setStatus(data.status);
-            setChecks(data.checks || []);
-            setLogs(data.logs || []);
-            setConnError(null);
-        });
-        es.addEventListener("config", (ev) => setConfig(JSON.parse(ev.data)));
-        es.addEventListener("status", (ev) => setStatus(JSON.parse(ev.data)));
-        es.addEventListener("log", (ev) => {
-            const entry = JSON.parse(ev.data);
-            setLogs((prev) => [entry, ...prev].slice(0, 60));
-        });
-        es.addEventListener("check", (ev) => {
-            const entry = JSON.parse(ev.data);
-            setChecks((prev) => [...prev, entry]);
-        });
-        es.onerror = () => {
-            // EventSource auto-reconnects, but on a 401 it just keeps thrashing.
-            // Probe /api/state once to confirm whether it's auth or offline.
-            apiGet("/state", token).catch((e) => {
-                if (e.message === "unauthorized") {
-                    clearToken();
-                    setToken("");
-                    setNeedsToken(true);
-                    es.close();
-                } else {
-                    setConnError("stream disconnected — backend offline?");
-                }
-            });
         };
 
-        return () => { es.close(); esRef.current = null; };
+        tick();
+
+        const onVis = () => {
+            if (typeof document !== "undefined" && !document.hidden) {
+                if (timer) { clearTimeout(timer); timer = null; }
+                tick();
+            }
+        };
+        if (typeof document !== "undefined") {
+            document.addEventListener("visibilitychange", onVis);
+        }
+
+        return () => {
+            cancelled = true;
+            if (timer) clearTimeout(timer);
+            if (typeof document !== "undefined") {
+                document.removeEventListener("visibilitychange", onVis);
+            }
+        };
     }, [token, needsToken]);
 
     // Tick once per second so the countdown updates from `status.nextCheckAt`.
@@ -325,6 +317,7 @@ export default function App() {
 
     const { strategy, backend, ollamaUrl, ollamaModel, checkEvery, targetPrice } = config;
     const { isRunning: running, loading, alert } = status;
+    const onVercel = Boolean(meta.cronSchedule);
 
     return (
         <div style={{ minHeight: "100vh", background: `radial-gradient(ellipse at 20% 0%, #1a0900 0%, ${C.bg} 60%)`, fontFamily: "'DM Mono', monospace", color: C.text, padding: "28px 16px", display: "flex", justifyContent: "center" }}>
@@ -340,7 +333,7 @@ export default function App() {
                             <h1 style={{ fontFamily: "'Playfair Display', serif", fontSize: 20, fontWeight: 900, margin: 0, background: `linear-gradient(120deg, ${C.gold}, ${C.amber})`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
                                 Coffee Price Sentinel
                             </h1>
-                            <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.1em" }}>BIALETTI PERFETTO MOKA CLASSICO 250G · INTERISMO.CH · BACKEND-DRIVEN</div>
+                            <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.1em" }}>BIALETTI PERFETTO MOKA CLASSICO 250G · INTERISMO.CH{onVercel ? " · VERCEL" : " · LOCAL"}</div>
                         </div>
                     </div>
 
@@ -351,8 +344,12 @@ export default function App() {
                             {connError ? `⚠ ${connError}` :
                                 alert ? `🎯 Target hit! CHF ${cur?.toFixed(2)} — buy now!` :
                                     loading ? "Fetching price from interismo.ch…" :
-                                        running ? `Monitoring — next check in ${countdown != null ? formatCountdown(countdown) : "…"}` :
-                                            "Idle — press Start to launch the backend loop"}
+                                        running ? (onVercel
+                                            ? `Monitoring — automatic check ${meta.cronSchedule || "daily"}${countdown != null ? ` (≈ ${formatCountdown(countdown)})` : ""}`
+                                            : `Monitoring — next check in ${countdown != null ? formatCountdown(countdown) : "…"}`) :
+                                            onVercel
+                                                ? "Idle — press Start to enable daily cron checks"
+                                                : "Idle — press Start to launch the backend loop"}
                         </span>
                         {checks.length > 0 && <span style={{ color: C.dim, fontSize: 10 }}>{checks.length} checks</span>}
                     </div>
@@ -406,6 +403,11 @@ export default function App() {
                                     pill(checkEvery === mins, label, () => saveConfig({ checkEvery: mins }))
                                 )}
                             </div>
+                            {meta.cronSchedule && (
+                                <div style={{ fontSize: 10, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
+                                    ⓘ On Vercel Hobby the actual cadence is <b style={{ color: C.text }}>{meta.cronSchedule}</b> (cron limit). Pills above are advisory — upgrade to Pro for finer control.
+                                </div>
+                            )}
                         </div>
 
                         {/* Extraction */}
@@ -451,7 +453,7 @@ export default function App() {
                                     </div>
                                 ) : (
                                     <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.7 }}>
-                                        Uses <code style={{ color: C.amber }}>claude-sonnet-4</code>. Set <code style={{ color: C.amber }}>ANTHROPIC_API_KEY</code> in <code>server/.env</code>.
+                                        Uses <code style={{ color: C.amber }}>claude-sonnet-4</code>. Set <code style={{ color: C.amber }}>ANTHROPIC_API_KEY</code> in {onVercel ? "Vercel env vars" : <code>server/.env</code>}.
                                         {" "}
                                         <span style={{ color: meta.anthropicKeyConfigured ? C.green : "#b07c30" }}>
                                             {meta.anthropicKeyConfigured ? "✓ key detected" : "⚠ key missing"}
@@ -474,7 +476,7 @@ export default function App() {
                                             <span style={{ color: on.length ? C.green : "#b07c30" }}>
                                                 {on.length
                                                     ? `✓ Active via ${pretty}`
-                                                    : "⚠ No channel configured — set SLACK_WEBHOOK_URL or TELEGRAM_* in server/.env"}
+                                                    : `⚠ No channel configured — set SLACK_WEBHOOK_URL or TELEGRAM_* in ${onVercel ? "Vercel env vars" : "server/.env"}`}
                                             </span>
                                         </span>
                                         {on.length > 0 && (() => {
@@ -568,7 +570,9 @@ export default function App() {
                 </div>
 
                 <div style={{ textAlign: "center", marginTop: 14, fontSize: 9, color: "#1e1000", letterSpacing: "0.06em" }}>
-                    NODE.JS BACKEND · SSE LIVE STREAM · PERSISTS TO DATA.JSON · RUNS 24/7
+                    {onVercel
+                        ? "VERCEL · SERVERLESS API · KV PERSISTENCE · DAILY CRON"
+                        : "NODE.JS BACKEND · SSE LIVE STREAM · PERSISTS TO DATA.JSON · RUNS 24/7"}
                 </div>
             </div>
             <style>{`input::placeholder{color:#1e1000}input:focus{border-color:#8B4513!important}::-webkit-scrollbar{width:3px}::-webkit-scrollbar-thumb{background:#2a1800;border-radius:4px}`}</style>

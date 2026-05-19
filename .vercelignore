@@ -1,0 +1,8 @@
+# Local Express backend isn't deployed to Vercel — `api/` is the source of
+# truth there. Keep the deploy package lean.
+server/
+
+# Working files
+*.log
+.env
+.env.local

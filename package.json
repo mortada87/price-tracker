@@ -11,9 +11,11 @@
     "server": "npm --prefix server start",
     "server:dev": "npm --prefix server run dev",
     "server:install": "npm --prefix server install",
-    "prod": "vite build && npm --prefix server start"
+    "prod": "vite build && npm --prefix server start",
+    "vercel:build": "vite build"
   },
   "dependencies": {
+    "@upstash/redis": "^1.38.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "recharts": "^3.8.1"

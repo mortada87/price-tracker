@@ -2,14 +2,16 @@
 
 Background-monitoring agent that watches the price of *Bialetti Café Perfetto Moka CLASSICO 250 g* on **interismo.ch** and alerts you when it drops below your target.
 
-The project is split into two pieces so the watcher keeps running even when the browser is closed:
+The project ships in **two deployment flavors** that share the React frontend:
 
-| Piece | Path | Role |
-|-------|------|------|
-| **Backend** | `server/` | Node.js + Express service that scrapes the page, optionally consults an LLM, persists history to `data.json`, and pushes live updates via Server-Sent Events. Runs 24/7 without a browser tab. |
-| **Frontend** | `src/` | Vite + React dashboard. Pure UI: fetches the current state, subscribes to the SSE stream, and POSTs button clicks back to the backend. |
+| Flavor | Backend | Persistence | Scheduling | When to use |
+|--------|---------|-------------|------------|-------------|
+| **Vercel** (recommended) | Serverless functions under `api/` | Vercel KV (Upstash Redis) | Vercel Cron — 1×/day on Hobby, finer on Pro | Always-on, zero-ops, free for personal use |
+| **Local + ngrok** | Long-running Node.js + Express in `server/` | `data.json` on disk | In-process `setTimeout` loop | When you want sub-second updates (SSE), arbitrary cadence, or run it on your own hardware |
 
-## Quick start
+The same React dashboard works against either backend — same API surface, same UI, just different transport (polling on Vercel, SSE locally).
+
+## Quick start (local dev)
 
 ```bash
 # one-time
@@ -25,7 +27,60 @@ npm run dev
 
 Open <http://localhost:5173>, set your target price, click **Start Monitoring**. The backend now runs the loop in the background; closing the browser tab does **not** stop monitoring.
 
-## Production / ngrok deployment (single port)
+## Deploy to Vercel (always-on, free tier)
+
+The repository is laid out so a Vercel import "just works": Vite builds the
+frontend, the `api/` directory becomes serverless functions, and `vercel.json`
+schedules the cron. Step by step:
+
+### 1. Provision a KV store
+
+In your Vercel project: **Storage → Create Database → Marketplace → Upstash →
+For Redis → Free**. Connect it to the project — Vercel injects
+`KV_REST_API_URL`, `KV_REST_API_TOKEN`, and friends automatically.
+
+### 2. Set environment variables
+
+In **Project → Settings → Environment Variables**, add:
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `ACCESS_TOKEN` | strongly recommended | Shared secret required on every `/api/*` request. Pick a long random string. |
+| `CRON_SECRET` | optional | When set, Vercel adds `Authorization: Bearer $CRON_SECRET` to the daily cron request. Set it; you don't want randos triggering scrapes. |
+| `SLACK_WEBHOOK_URL` | optional | Slack Incoming Webhook URL. |
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | optional | Telegram bot credentials. |
+| `ANTHROPIC_API_KEY` | only if you pick the LLM strategy | — |
+
+### 3. Import the repo
+
+**Vercel dashboard → Add New → Project → Import** your GitHub repo.
+Framework preset: Vite (auto-detected). No overrides needed.
+
+### 4. First deploy
+
+Push to `main`. Vercel builds the React app and registers the cron.
+Hit `https://<your-project>.vercel.app/#token=<ACCESS_TOKEN>`, click **Start**,
+and the next daily cron tick will start populating your history.
+
+### Cadence caveat (Vercel Hobby)
+
+Vercel Hobby caps cron at **1 trigger per day with ±59 min jitter**. The "CHECK
+EVERY" pills in the UI become advisory: the actual cadence is whatever
+`vercel.json`'s `crons[].schedule` says (default `0 9 * * *` = ~10:00 Swiss
+time). To run more often, either upgrade to Pro ($20/mo, down to every minute)
+or wire an external uptime monitor (cron-job.org, UptimeRobot) to ping
+`/api/cron/check?token=$ACCESS_TOKEN` on your preferred schedule.
+
+### Testing the cron manually
+
+```bash
+curl -X GET "https://<your-project>.vercel.app/api/cron/check" \
+     -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+If `isRunning` is true in KV, this runs a real check and fires notifications.
+
+## Local + ngrok deployment (the original flavor)
 
 For "run it on my laptop and expose it via ngrok", everything collapses onto
 the backend's port — no separate Vite dev server, no separate frontend host.
@@ -87,43 +142,70 @@ The message uses Block Kit and includes a clickable "Buy on interismo.ch" button
 
 ## Backend API
 
-All endpoints live under `/api` (proxied by Vite in dev):
+The same surface is implemented by both flavors (Express routes locally, one
+function per file on Vercel):
 
 | Method | Path | Body | Notes |
 |--------|------|------|-------|
 | `GET`  | `/api/state` | — | Full snapshot: config, checks history, recent logs, status, meta. |
-| `POST` | `/api/config` | partial config | Updates target price, interval, strategy, LLM settings. Rearms the next-wake-up timer if running. |
-| `POST` | `/api/start` | — | Starts the recurring check loop. |
-| `POST` | `/api/stop`  | — | Pauses the loop. |
+| `POST` | `/api/config` | partial config | Updates target price, interval, strategy, LLM settings. |
+| `POST` | `/api/start` | — | Sets `isRunning=true`. Local: starts the loop. Vercel: lets the cron actually do work. |
+| `POST` | `/api/stop`  | — | Pauses the loop / gates the cron. |
 | `POST` | `/api/check-now` | — | Forces an immediate price check. |
 | `POST` | `/api/alert/dismiss` | — | Clears the in-memory "target hit" flag. |
-| `GET`  | `/api/stream` | — | **SSE.** Emits `state` (initial snapshot), then incremental `log`, `check`, `status`, `config` events. |
-| `GET`  | `/api/health` | — | Liveness probe. |
+| `POST` | `/api/notifier/test` | — | Fires a "this is a test" notification through every configured channel. |
+| `GET`  | `/api/stream` | — | **SSE** — local only. Vercel uses 3 s polling against `/api/state`. |
+| `GET`  | `/api/cron/check` | — | **Vercel only** — entry point for Vercel Cron. Manual triggers require the same Bearer token. |
+| `GET`  | `/health` (local) / `/api/health` (Vercel) | — | Unauthenticated liveness probe. |
 
 ## Persistence
 
-State is written to `server/data.json` (atomic rename via a `.tmp` file, debounced ~400 ms). Restart-safe: history and logs survive process restarts; the loop is **not** auto-resumed on boot — press Start again so the user opts in.
+- **Local:** atomic, debounced writes to `server/data.json`. Restart-safe.
+- **Vercel:** Upstash Redis (free tier). Inspectable from the Vercel dashboard
+  → Storage → Data browser.
+
+In both cases the loop is **not** auto-resumed on boot — you press Start so the
+operator opts in explicitly.
 
 ## Architecture notes
 
-- The backend is the **single source of truth**. The React app is a thin client that mirrors state via SSE.
-- The browser `Notification` API is gone — alerts are pushed by the backend (Telegram) so they work with the tab closed.
-- No more CORS proxies in Vite. The Node.js process fetches `interismo.ch` directly (with a real `User-Agent`), and Anthropic / Ollama calls also leave the server, not your browser.
+- The backend is the **single source of truth**. The React app is a thin
+  client that mirrors state via SSE (local) or polling (Vercel).
+- Alerts are pushed server-side (Slack and/or Telegram), so they fire even if
+  no browser tab is open.
+- The scraper and notifier code is shared verbatim between `server/` and
+  `api/_lib/` — only the state store and the transport differ.
 
 ## Layout
 
 ```
 .
-├── src/                 # React frontend
-│   └── App.jsx          # Dashboard (REST + SSE client)
-├── server/              # Node.js backend (independent npm package)
+├── src/                 # React frontend (works against both backends)
+│   └── App.jsx          # Dashboard: REST + polling (Vercel) / SSE (local)
+├── api/                 # Vercel serverless functions — `vercel.json`
+│   ├── state.js         #   wires these into routes automatically.
+│   ├── config.js
+│   ├── start.js, stop.js
+│   ├── check-now.js
+│   ├── health.js
+│   ├── notifier/test.js
+│   ├── alert/dismiss.js
+│   ├── cron/check.js    # ← invoked daily by Vercel Cron
+│   └── _lib/
+│       ├── store.js     # KV-backed state (Upstash Redis)
+│       ├── scraper.js   # = server/scraper.js
+│       ├── notifier.js  # = server/notifier.js
+│       ├── check.js     # shared "run one price check" pipeline
+│       └── auth.js      # ACCESS_TOKEN guard
+├── server/              # Local Node.js + Express backend (alt deploy)
 │   ├── index.js         # Express app + routes + SSE
 │   ├── scraper.js       # extractPriceFromMeta + extractPriceWithLLM
 │   ├── state.js         # in-memory state + JSON persistence
 │   ├── scheduler.js     # background loop driven by checkEvery
-│   ├── notifier.js      # Telegram notifications
+│   ├── notifier.js      # Telegram + Slack notifications
 │   ├── data.json        # auto-created, gitignored
 │   └── .env.example
-├── vite.config.js       # proxies /api → http://localhost:3000
+├── vercel.json          # cron schedule + function timeouts
+├── vite.config.js       # proxies /api → http://localhost:3000 in dev
 └── package.json
 ```

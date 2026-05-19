@@ -81,7 +81,7 @@ export class StateStore extends EventEmitter {
     // ── mutators ────────────────────────────────────────────────────────────
 
     updateConfig(patch) {
-        const cleaned = sanitizeConfig(patch, this.state.config);
+        const cleaned = sanitizeConfig(patch);
         this.state.config = { ...this.state.config, ...cleaned };
         this.emit("config", this.state.config);
         this._scheduleWrite();
@@ -152,7 +152,7 @@ export class StateStore extends EventEmitter {
     }
 }
 
-function sanitizeConfig(patch, current) {
+function sanitizeConfig(patch) {
     const out = {};
     if (typeof patch.productUrl === "string" && patch.productUrl.trim()) {
         out.productUrl = patch.productUrl.trim();
