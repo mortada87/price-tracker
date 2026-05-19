@@ -3,8 +3,14 @@
 import { requireAuth } from "./_lib/auth.js";
 import { snapshot } from "./_lib/store.js";
 import { notifierStatus, notifierConfigured } from "./_lib/notifier.js";
+import { kvEnvPresent } from "./_lib/redis.js";
 
 async function handler(req, res) {
+    if (req.method && req.method !== "GET") {
+        res.status(405).json({ error: "method not allowed" });
+        return;
+    }
+
     const data = await snapshot();
     res.json({
         ...data,
@@ -13,9 +19,7 @@ async function handler(req, res) {
             notifiers: notifierStatus(),
             anthropicKeyConfigured: Boolean(process.env.ANTHROPIC_API_KEY),
             authRequired: Boolean(process.env.ACCESS_TOKEN),
-            // Cron cadence on Vercel is fixed in vercel.json. Surface the
-            // actual schedule so the UI can stop pretending checkEvery is
-            // dynamic when running on Vercel Hobby.
+            kvConfigured: kvEnvPresent(),
             cronSchedule: process.env.VERCEL ? "daily (Hobby tier)" : null,
             serverTime: Date.now(),
         },

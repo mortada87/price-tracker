@@ -1,4 +1,6 @@
 // Shared auth guard for every /api/* function.
+
+import { respondError } from "./errors.js";
 //
 // Mirrors the Express middleware in `server/index.js`: when `ACCESS_TOKEN`
 // is set, requests must present the token either as `?token=<value>` or as
@@ -34,10 +36,14 @@ export function isAuthorised(req) {
 // Convenience wrapper for the common case "401 if missing token".
 export function requireAuth(handler) {
     return async function (req, res) {
-        if (!isAuthorised(req)) {
-            res.status(401).json({ error: "missing or invalid token" });
-            return;
+        try {
+            if (!isAuthorised(req)) {
+                res.status(401).json({ error: "missing or invalid token" });
+                return;
+            }
+            await handler(req, res);
+        } catch (err) {
+            respondError(res, err);
         }
-        return handler(req, res);
     };
 }

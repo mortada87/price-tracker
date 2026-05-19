@@ -65,7 +65,15 @@ function withToken(url, token) {
 async function apiGet(path, token) {
     const res = await fetch(withToken(`${API}${path}`, token));
     if (res.status === 401) throw new Error("unauthorized");
-    if (!res.ok) throw new Error(`GET ${path} → HTTP ${res.status}`);
+    if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+            const body = await res.json();
+            if (body.hint) detail = body.hint;
+            else if (body.error) detail = body.error;
+        } catch { /* ignore */ }
+        throw new Error(detail);
+    }
     return res.json();
 }
 async function apiPost(path, body, token) {
@@ -75,7 +83,15 @@ async function apiPost(path, body, token) {
         body: JSON.stringify(body ?? {}),
     });
     if (res.status === 401) throw new Error("unauthorized");
-    if (!res.ok) throw new Error(`POST ${path} → HTTP ${res.status}`);
+    if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+            const bodyJson = await res.json();
+            if (bodyJson.hint) detail = bodyJson.hint;
+            else if (bodyJson.error) detail = bodyJson.error;
+        } catch { /* ignore */ }
+        throw new Error(detail);
+    }
     return res.json();
 }
 
