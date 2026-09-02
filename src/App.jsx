@@ -409,6 +409,9 @@ export default function App() {
                                     </span>
                                 )}
                             </div>
+                            <div style={{ fontSize: 10, color: C.dim, marginTop: 8, lineHeight: 1.6 }}>
+                                Alerts on target hit <span style={{ color: C.text }}>and</span> any up/down move vs the previous check.
+                            </div>
                         </div>
 
                         {/* Interval */}

@@ -11,6 +11,8 @@ The project ships in **two deployment flavors** that share the React frontend:
 
 The same React dashboard works against either backend — same API surface, same UI, just different transport (polling on Vercel, SSE locally).
 
+**Full topology, component interactions, and runbooks:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+
 ## Quick start (local dev)
 
 ```bash
